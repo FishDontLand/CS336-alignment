@@ -11,7 +11,7 @@ from cs336_alignment.SFT import evaluate_vllm
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn, extract_boxed_answer
 
 
-def zero_shot_evaluation():
+def zero_shot_evaluation(output_file, model_path=None):
     all_subjects = [
         'algebra',
         'counting_and_probability',
@@ -35,9 +35,11 @@ def zero_shot_evaluation():
         questions = questions + list(sampled_ds['problem'])
         answers = answers + list(sampled_ds['solution'])
 
-    model_folder = '/workspace/cs336/hf_cache/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots'
-    model_hash = '4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2'
-    model_path = model_folder + '/' + model_hash
+    # use the default Qwen2.5 model if model_path is missing
+    if model_path is None:
+        model_folder = '/workspace/cs336/hf_cache/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots'
+        model_hash = '4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2'
+        model_path = model_folder + '/' + model_hash
     llm = LLM(model=model_path)
 
     sampling_params = SamplingParams(
@@ -58,13 +60,13 @@ def zero_shot_evaluation():
         sampling_params,
     )
 
-    with open('./outputs/zero_shot_eval.jsonl', 'w') as f:
+    with open(output_file, 'w') as f:
         for entry in results:
             f.write(json.dumps(entry) + '\n')
 
-def analyze_eval_results():
+def analyze_eval_results(result_file_path):
     results = []
-    with open('./outputs/zero_shot_eval.jsonl', 'r') as f:
+    with open(result_file_path, 'r') as f:
         for line in f:
             results.append(json.loads(line))
 
@@ -113,7 +115,12 @@ def analyze_eval_results():
 
 
 if __name__ == '__main__':
-    analyze_eval_results()
+    zero_shot_evaluation(output_file='./evaluations/results_without_sft.jsonl')
+    zero_shot_evaluation(output_file='./evaluations/results_after_expert_iteration.jsonl',
+                         model_path='./outputs')
+    analyze_eval_results('./evaluations/results_without_sft.jsonl')
+    analyze_eval_results('./evaluations/results_after_expert_iteration.jsonl')
+
 
 
 

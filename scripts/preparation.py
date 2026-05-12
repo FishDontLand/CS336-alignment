@@ -20,17 +20,16 @@ def prepare_hendrycks_math_data():
     with open('./cs336_alignment/prompts/r1_zero.prompt', 'r') as f:
         prompt = f.read()
 
-    for subject in all_subjects:
-        ds = load_dataset(
-            'EleutherAI/hendrycks_math',
-            subject,
-            cache_dir="/workspace/cs336/hf_cache/datasets"
-        )
-
-        for data_type in ['train', 'test']:
-            qas = []
+    for data_type in ['train', 'test']:
+        qas = []
+        for subject in all_subjects:
+            ds = load_dataset(
+                'EleutherAI/hendrycks_math',
+                subject,
+                cache_dir="/workspace/cs336/hf_cache/datasets"
+            )
             data = ds[data_type]
-            questions = list(data['question'])
+            questions = list(data['problem'])
             solutions = list(data['solution'])
             for i in range(len(questions)):
                 q = prompt.replace('{question}', questions[i])
@@ -39,9 +38,9 @@ def prepare_hendrycks_math_data():
                     'answer': solutions[i]
                 })
 
-            with open(f'./data/{data_type}.jsonl', 'w') as f:
-                for entry in qas:
-                    f.write(json.dumps(entry) + '\n')
+        with open(f'./data/{data_type}.jsonl', 'w') as f:
+            for entry in qas:
+                f.write(json.dumps(entry) + '\n')
 
 
 if __name__ == '__main__':

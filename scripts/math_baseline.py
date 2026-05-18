@@ -116,10 +116,10 @@ def analyze_eval_results(result_file_path):
 
 if __name__ == '__main__':
     zero_shot_evaluation(output_file='./evaluations/results_without_sft.jsonl')
-    zero_shot_evaluation(output_file='./evaluations/results_after_expert_iteration.jsonl',
-                         model_path='./outputs')
+    zero_shot_evaluation(output_file='./evaluations/experiments1/results_after_expert_iteration.jsonl',
+                         model_path='./outputs/experiments1')
     analyze_eval_results('./evaluations/results_without_sft.jsonl')
-    analyze_eval_results('./evaluations/results_after_expert_iteration.jsonl')
+    analyze_eval_results('./evaluations/experiments1/results_after_expert_iteration.jsonl')
 
 
 

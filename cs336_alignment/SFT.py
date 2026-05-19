@@ -85,8 +85,12 @@ def sft_microbatch_train_step(
     log_likelihood = masked_normalize(policy_log_probs, response_mask, normalize_constant, -1)
     loss = -log_likelihood.mean()  / gradient_accumulation_steps
     loss.backward()
+
+    log_likelihood_cpu = log_likelihood.detach().cpu()
     return (loss.detach().cpu(),
-            {'log_likelihood': log_likelihood}
+            {'max_likelihood': log_likelihood_cpu.max(),
+             'min_likelihood': log_likelihood_cpu.min(),
+             'std_likelihood': log_likelihood_cpu.std()}
     )
 
 def log_generations(
@@ -275,7 +279,7 @@ def run_sft(prompts: list[str], responses: list[str], valid_prompts: list[str], 
                 scale = grad_clip / math.sqrt(total_var)
 
                 for group in optimizer.param_groups:
-                    for p in group[('params')]:
+                    for p in group['params']:
                         if p.grad is not None:
                             p.grad = scale * p.grad.data
 

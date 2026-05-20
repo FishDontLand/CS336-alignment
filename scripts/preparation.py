@@ -42,6 +42,16 @@ def prepare_hendrycks_math_data():
             for entry in qas:
                 f.write(json.dumps(entry) + '\n')
 
+def prepare_model(cache_path):
+    repo_id = "Qwen/Qwen2.5-Math-1.5B"
+
+    path = snapshot_download(
+        repo_id=repo_id,
+        cache_dir=cache_path,
+    )
+
+    print("Model downloaded to:")
+    print(path)
 
 if __name__ == '__main__':
-    prepare_hendrycks_math_data()
+    prepare_model('/workspace/CS336-alignment/models/original_models')

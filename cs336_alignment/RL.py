@@ -4,6 +4,7 @@ from typing import Callable, Literal
 
 import numpy as np
 import torch
+import wandb
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import SamplingParams
 
@@ -59,7 +60,7 @@ def compute_grpo_clip_loss(
 
     loss = -torch.where(is_clipped, clipped_advantage, adjust_advantage)
     meta_data = {
-        'is_clipped': is_clipped.detach().cpu()
+        'clip_fraction': is_clipped.detach().cpu().sum() / is_clipped.numel()
     }
     return loss, meta_data
 
@@ -110,7 +111,7 @@ def grpo_microbatch_train_step(
         cliprange
     )
 
-    per_example_loss = masked_mean(loss, response_mask) / gradient_accumulation_steps
+    per_example_loss = masked_mean(loss, response_mask, dim=-1) / gradient_accumulation_steps
     total_loss = per_example_loss.mean()
 
     total_loss.backward()
@@ -122,12 +123,12 @@ def grpo_microbatch_train_step(
         'example_loss_std': example_loss_cpu.std(),
     }
 
-def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps: float = 1e-6,
+def run_rl(output_dir: str | None = None, n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps: float = 1e-6,
              rollout_batch_size: int = 256, group_size: int = 8, sampling_temperature: float = 1.0,
              sampling_min_tokens: int = 4, sampling_max_tokens: int = 1024, epochs_per_rollout_batch: int = 1,
              mini_batch_size: int = 2, gpu_memory_utilization: float = 0.85,
              loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline",
-             use_std_normalization: bool = True, cliprange: float=0.2, grad_clip: float | None=1.0, eval_freq: int=5):
+             use_std_normalization: bool = True, cliprange: float=0.2, grad_clip: float | None=1.0, eval_freq: int=5, run: wandb.Run=None):
 
     train_batch_size = rollout_batch_size // epochs_per_rollout_batch
     assert rollout_batch_size % train_batch_size == 0, (
@@ -146,23 +147,23 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
         "train_batch_size must be greater than or equal to group_size"
     )
 
-    n_questions = rollout_batch_size / group_size
+    n_questions = rollout_batch_size // group_size
     train_data = []
     with open('./data/train.jsonl', 'r') as f:
         for line in f:
             train_data.append(json.loads(line))
 
     valid_data = []
-    with open('./data/valid.jsonl', 'r') as f:
+    with open('./data/test.jsonl', 'r') as f:
         for line in f:
             valid_data.append(json.loads(line))
 
     np.random.seed(42)
-    valid_data = np.random.choice(valid_data, size=2048, replace=False)
+    valid_data = np.random.choice(valid_data, size=1024, replace=False)
     valid_prompts = [e['question'] for e in valid_data]
     valid_answers = [e['answer'] for e in valid_data]
 
-    model_path = '/workspace/cs336/hf_cache/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots'
+    model_path = '/workspace/CS336-alignment/models/original_models/models--Qwen--Qwen2.5-Math-1.5B/snapshots'
     model_hash = '4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2'
     full_path = model_path + '/' + model_hash
 
@@ -195,6 +196,13 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
 
 
     total_update_steps = 0
+
+    if run is not None:
+        wandb.define_metric("train_step")
+        wandb.define_metric("val_step")
+        wandb.define_metric("train/*", step_metric="train_step")
+        wandb.define_metric("val/*", step_metric="val_step")
+
     for step in range(n_grpo_steps):
         selections = np.random.choice(train_data, size=n_questions, replace=False)
         sample_questions = [e['question'] for e in selections]
@@ -220,10 +228,11 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
             use_std_normalization
         )
 
+        raw_rewards = raw_rewards.to("cuda:0").view(-1, 1)
+        group_normalized_rewards = group_normalized_rewards.to("cuda:0").view(-1, 1)
+
         tokenized_results_by_epoch = []
         old_log_probs = [] if loss_type == 'grpo_clip' else None
-        current_params = policy_model.state_dict()
-        policy_model.load_state_dict(old_params)
 
         for epoch in range(epochs_per_rollout_batch):
             train_questions = rollout_questions[epoch * train_batch_size:(epoch + 1) * train_batch_size]
@@ -234,6 +243,7 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
                 train_responses,
                 tokenizer
             )
+            tokenized_results['response_mask'] = torch.abs(tokenized_results['response_mask'] - 1.0) < 1e-10
 
             tokenized_results_by_epoch.append(tokenized_results)
             with torch.inference_mode():
@@ -242,17 +252,16 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
                     for mini_batch_step in range(grad_acc_steps):
                         input_ids = tokenized_results['input_ids'][
                             mini_batch_step * mini_batch_size: (mini_batch_step + 1) * mini_batch_size]
-                        response_mask = tokenized_results['response_mask'][
+                        labels = tokenized_results['labels'][
                             mini_batch_step * mini_batch_size: (mini_batch_step + 1) * mini_batch_size]
 
                         mini_batch_log_probs = get_response_log_probs(
                             policy_model,
                             input_ids.to('cuda:0'),
-                            response_mask.to('cuda:0')
+                            labels.to('cuda:0')
                         )['log_probs']
                         old_log_probs[-1].append(mini_batch_log_probs)
 
-            policy_model.load_state_dict(current_params)
 
         for epoch in range(epochs_per_rollout_batch):
             train_rewards = raw_rewards[epoch * train_batch_size:(epoch + 1) * train_batch_size]
@@ -264,18 +273,15 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
             avg_entropy = 0.0
             avg_clip_fraction = 0.0
             for mini_batch_step in range(grad_acc_steps):
-                if mini_batch_step < grad_acc_steps - 1:
-                    input_ids = tokenized_results['input_ids'][mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size]
-                    response_mask = tokenized_results['response_mask'][mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size]
-                else:
-                    input_ids = tokenized_results['input_ids'][mini_batch_step * mini_batch_size :]
-                    response_mask = tokenized_results['response_mask'][mini_batch_step * mini_batch_size:]
+                input_ids = tokenized_results['input_ids'][mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size]
+                labels = tokenized_results['labels'][mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size]
+                response_mask = tokenized_results['response_mask'][mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size]
+                response_mask = response_mask.to("cuda:0")
 
-                response_mask = response_mask.to('cuda:0')
                 min_batch_results = get_response_log_probs(
                     policy_model,
                     input_ids.to('cuda:0'),
-                    response_mask,
+                    labels.to('cuda:0'),
                     return_token_entropy=True,
                 )
                 mini_batch_log_probs = min_batch_results['log_probs']
@@ -287,25 +293,25 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
                     response_mask,
                     grad_acc_steps,
                     loss_type,
-                    raw_rewards=train_rewards.to('cuda:0'),
-                    advantages=advantages.to('cuda:0'),
+                    raw_rewards=train_rewards[mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size] if loss_type == 'no_baseline' else None,
+                    advantages=advantages[mini_batch_step * mini_batch_size : (mini_batch_step + 1) * mini_batch_size],
                     old_log_probs = old_log_probs[epoch][mini_batch_step] if loss_type == 'grpo_clip' else None,
                     cliprange=cliprange,
                 )
 
                 if loss_type == 'grpo_clip':
-                    avg_clip_fraction += meta_data['clip_fraction']
+                    avg_clip_fraction += meta_data['clip_fraction'] / grad_acc_steps
                 avg_loss += loss.detach().cpu().item()
 
             # gradient clip
-            total_var = 0
+            total_var = 0.0
             for group in optimizer.param_groups:
                 for p in group['params']:
                     if p.grad is not None:
                         total_var += (p.grad.data * p.grad.data).sum()
 
             if grad_clip is not None and total_var > grad_clip * grad_clip:
-                scale = grad_clip / math.sqrt(total_var)
+                scale = grad_clip / torch.sqrt(total_var)
 
                 for group in optimizer.param_groups:
                     for p in group['params']:
@@ -313,11 +319,19 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
                             p.grad = scale * p.grad.data
 
             train_summary = {
+                'train_step': total_update_steps,
                 'train/loss': avg_loss,
                 'train/grad_norm': math.sqrt(total_var),
                 'train/token_entropy': avg_entropy,
+                'train/rewards': reward_meta_data['mean']
             }
-            print(train_summary)
+            if loss_type == 'grpo_clip':
+                train_summary['train/clip_fraction'] = avg_clip_fraction
+
+            if run is None:
+                print(train_summary)
+            else:
+                run.log(train_summary)
 
             optimizer.step()
             optimizer.zero_grad()
@@ -330,7 +344,16 @@ def run_grpo(n_grpo_steps: int = 200, learning_rate: float = 1e-5, advantage_eps
                 eval_summary = {'val/' + k: v for k, v in eval_summary.items()}
                 eval_summary['val_step'] = step // eval_freq
 
-                print(eval_summary)
+                if run is None:
+                    print(eval_summary)
+                else:
+                    run.log(eval_summary)
 
-        old_params = policy_model.state_dict()
+        old_params = {k: v.detach().clone() for k, v in policy_model.state_dict().items()}
 
+    if output_dir is not None:
+        policy_model.save_pretrained(save_directory=output_dir)
+        tokenizer.save_pretrained(save_directory=output_dir)
+
+if __name__ == '__main__':
+    run_rl('/workspace/CS336-alignment/models/tuned_models')

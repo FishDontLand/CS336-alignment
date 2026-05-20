@@ -210,7 +210,7 @@ def output_strs():
 
 @pytest.fixture
 def model_id():
-    model_path = '/workspace/cs336/hf_cache/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots'
+    model_path = '/workspace/CS336-alignment/models/original_models/models--Qwen--Qwen2.5-Math-1.5B/snapshots'
     model_hash = '4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2'
     full_path = model_path + '/' + model_hash
     return full_path
